@@ -1,0 +1,106 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: taskqueue-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-taskqueue}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_local_dev_only}
+      POSTGRES_DB: ${POSTGRES_DB:-taskqueue_db}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-taskqueue} -d ${POSTGRES_DB:-taskqueue_db}"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: taskqueue-redis
+    restart: always
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+
+  gateway:
+    image: taskqueue:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: taskqueue-gateway
+    restart: on-failure
+    command: uvicorn services.gateway.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "${GATEWAY_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-taskqueue}:${POSTGRES_PASSWORD:-changeme_local_dev_only}@postgres:5432/${POSTGRES_DB:-taskqueue_db}
+      - REDIS_URL=redis://redis:6379/0
+
+  dispatcher:
+    image: taskqueue:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: taskqueue-dispatcher
+    restart: on-failure
+    command: python -m services.dispatcher.main
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-taskqueue}:${POSTGRES_PASSWORD:-changeme_local_dev_only}@postgres:5432/${POSTGRES_DB:-taskqueue_db}
+      - REDIS_URL=redis://redis:6379/0
+
+  worker:
+    image: taskqueue:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: on-failure
+    command: python -m services.worker.server
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-taskqueue}:${POSTGRES_PASSWORD:-changeme_local_dev_only}@postgres:5432/${POSTGRES_DB:-taskqueue_db}
+      - REDIS_URL=redis://redis:6379/0
+
+volumes:
+  postgres_data:
+  redis_data:
